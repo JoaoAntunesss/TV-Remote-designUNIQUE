@@ -1,8 +1,6 @@
 package com.antunes.remote;
 
 import android.os.Build;
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -15,14 +13,12 @@ import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Arrays;
-import java.util.Date;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
-import javax.security.auth.x500.X500Principal;
 
 /**
  * Talks to the TV's built-in "Android TV Remote Service" (the same one the Google TV phone app uses):
@@ -38,7 +34,6 @@ final class AtvClient {
             K_REWIND = 89, K_FAST_FORWARD = 90, K_MUTE = 164, K_CH_UP = 166, K_CH_DOWN = 167, K_SETTINGS = 176,
             K_TV_INPUT = 178;
 
-    private static final String ALIAS = "comando-tv";
     private final String host;
     private final Listener listener;
     private volatile SSLSocket remote;
@@ -54,25 +49,41 @@ final class AtvClient {
 
     // ------------------------------------------------------------ TLS with our own key (kept in the phone's keystore)
 
-    private static SSLContext tls() throws Exception {
-        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
-        ks.load(null);
-        if (!ks.containsAlias(ALIAS)) {
-            KeyPairGenerator g = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore");
-            long now = System.currentTimeMillis();
-            g.initialize(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
-                    .setKeySize(2048)
-                    .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384, KeyProperties.DIGEST_SHA512)
-                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1, KeyProperties.SIGNATURE_PADDING_RSA_PSS)
-                    .setCertificateSubject(new X500Principal("CN=atvremote"))
-                    .setCertificateSerialNumber(BigInteger.valueOf(now))
-                    .setCertificateNotBefore(new Date(now - 86_400_000L))
-                    .setCertificateNotAfter(new Date(now + 25L * 365 * 86_400_000L))
-                    .build());
-            g.generateKeyPair();
+    /**
+     * Our TLS identity: a normal RSA key with a self-signed certificate, kept in the app's private files.
+     * (Keys inside the Android keystore fail in the TLS handshake on some phones, e.g. Xiaomi.)
+     */
+    private static java.security.PrivateKey key;
+    private static X509Certificate cert;
+
+    private static synchronized void identity() throws Exception {
+        if (key != null) return;
+        java.io.File dir = App.files();
+        java.io.File kf = new java.io.File(dir, "tls.key"), cf = new java.io.File(dir, "tls.crt");
+        java.security.cert.CertificateFactory f = java.security.cert.CertificateFactory.getInstance("X.509");
+        if (kf.exists() && cf.exists()) {
+            key = java.security.KeyFactory.getInstance("RSA").generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(java.nio.file.Files.readAllBytes(kf.toPath())));
+            cert = (X509Certificate) f.generateCertificate(new java.io.ByteArrayInputStream(java.nio.file.Files.readAllBytes(cf.toPath())));
+            return;
         }
+        KeyPairGenerator g = KeyPairGenerator.getInstance("RSA");
+        g.initialize(2048);
+        java.security.KeyPair kp = g.generateKeyPair();
+        byte[] der = Der.selfSigned(kp, "atvremote");
+        cert = (X509Certificate) f.generateCertificate(new java.io.ByteArrayInputStream(der));
+        key = kp.getPrivate();
+        java.nio.file.Files.write(kf.toPath(), key.getEncoded());
+        java.nio.file.Files.write(cf.toPath(), der);
+    }
+
+    private static SSLContext tls() throws Exception {
+        identity();
+        char[] pw = "comando".toCharArray();
+        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+        ks.load(null, null);
+        ks.setKeyEntry("me", key, pw, new java.security.cert.Certificate[]{cert});
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-        kmf.init(ks, null);
+        kmf.init(ks, pw);
         TrustManager[] trust = {new X509TrustManager() { // the TV's certificate is self-signed
             @Override public void checkClientTrusted(X509Certificate[] c, String a) { }
             @Override public void checkServerTrusted(X509Certificate[] c, String a) { }
@@ -92,9 +103,8 @@ final class AtvClient {
     }
 
     private static RSAPublicKey myKey() throws Exception {
-        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
-        ks.load(null);
-        return (RSAPublicKey) ks.getCertificate(ALIAS).getPublicKey();
+        identity();
+        return (RSAPublicKey) cert.getPublicKey();
     }
 
     // ------------------------------------------------------------ pairing (port 6467)
