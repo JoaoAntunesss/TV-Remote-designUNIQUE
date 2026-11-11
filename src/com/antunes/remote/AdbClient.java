@@ -179,29 +179,41 @@ final class AdbClient implements Remote {
     /** Starts a command and gives its output as it arrives (for the live video of the screen). */
     java.io.InputStream execStream(String cmd) throws Exception {
         if (!ready) throw new IOException("not connected");
-        Stream s = open("exec:" + cmd, 5000);
-        return new java.io.InputStream() {
-            byte[] cur; int pos; boolean done;
-            @Override public int read() throws IOException { byte[] one = new byte[1]; return read(one, 0, 1) < 0 ? -1 : one[0] & 0xFF; }
-            @Override public int read(byte[] b, int off, int len) throws IOException {
-                while (cur == null || pos >= cur.length) {
-                    if (done || (s.closed && s.in.isEmpty())) return -1;
-                    try { cur = s.in.poll(500, TimeUnit.MILLISECONDS); } catch (InterruptedException e) { throw new IOException(e); }
-                    pos = 0;
-                    if (!ready) return -1;
-                }
-                int n = Math.min(len, cur.length - pos);
-                System.arraycopy(cur, pos, b, off, n);
-                pos += n;
-                return n;
+        return new ExecIn(open("exec:" + cmd, 5000));
+    }
+
+    /** Output of a running command, read as it arrives. */
+    private final class ExecIn extends java.io.InputStream {
+        private final Stream st;
+        private byte[] cur;
+        private int pos;
+        private boolean done;
+
+        ExecIn(Stream st) { this.st = st; }
+
+        @Override public int read() throws IOException {
+            byte[] one = new byte[1];
+            return read(one, 0, 1) < 0 ? -1 : one[0] & 0xFF;
+        }
+
+        @Override public int read(byte[] b, int off, int len) throws IOException {
+            while (cur == null || pos >= cur.length) {
+                if (done || (st.closed && st.in.isEmpty()) || !ready) return -1;
+                try { cur = st.in.poll(500, TimeUnit.MILLISECONDS); } catch (InterruptedException e) { throw new IOException(e); }
+                pos = 0;
             }
-            @Override public void close() {
-                if (done) return;
-                done = true;
-                try { if (!s.closed) write(CLSE, s.local, s.remote, null); } catch (IOException ignored) { }
-                streams.remove(s.local);
-            }
-        };
+            int n = Math.min(len, cur.length - pos);
+            System.arraycopy(cur, pos, b, off, n);
+            pos += n;
+            return n;
+        }
+
+        @Override public void close() {
+            if (done) return;
+            done = true;
+            try { if (!st.closed) write(CLSE, st.local, st.remote, null); } catch (IOException ignored) { }
+            streams.remove(st.local);
+        }
     }
 
     String sh(String cmd) throws Exception { return new String(exec(cmd, 15_000), StandardCharsets.UTF_8); }
