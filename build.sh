@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Builds ComandoTV.apk with the plain Android SDK tools (no Gradle). Needs ANDROID_HOME with
-# platforms;android-34 and build-tools;34.0.0, and a JDK 17.
+# platforms;android-34 and build-tools;36.0.0, and a JDK 17.
 set -euo pipefail
 cd "$(dirname "$0")"
 SDK="${ANDROID_HOME:?set ANDROID_HOME}"
-BT="$SDK/build-tools/34.0.0"
+BT="$SDK/build-tools/36.0.0"
 JAR="$SDK/platforms/android-34/android.jar"
 B=build
 rm -rf "$B" && mkdir -p "$B/gen" "$B/classes" "$B/dex"

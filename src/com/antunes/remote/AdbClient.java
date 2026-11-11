@@ -183,7 +183,7 @@ final class AdbClient implements Remote {
     }
 
     /** Output of a running command, read as it arrives. */
-    final class Feed {
+    final class Feed implements LiveScreen.Source {
         private final Stream st;
         private byte[] cur;
         private int pos;
@@ -191,7 +191,7 @@ final class AdbClient implements Remote {
 
         Feed(Stream st) { this.st = st; }
 
-        int read(byte[] b) throws IOException {
+        @Override public int read(byte[] b) throws IOException {
             int off = 0, len = b.length;
             while (cur == null || pos >= cur.length) {
                 if (done || (st.closed && st.in.isEmpty()) || !ready) return -1;
@@ -204,7 +204,7 @@ final class AdbClient implements Remote {
             return n;
         }
 
-        void close() {
+        @Override public void close() {
             if (done) return;
             done = true;
             try { if (!st.closed) write(CLSE, st.local, st.remote, null); } catch (IOException ignored) { }

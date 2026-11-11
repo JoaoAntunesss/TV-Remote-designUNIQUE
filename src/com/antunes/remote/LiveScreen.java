@@ -7,22 +7,54 @@ import android.view.Surface;
 import java.nio.ByteBuffer;
 
 /**
- * The TV screen as live video: the box records its screen in H.264 (screenrecord) and sends it through ADB;
- * the phone decodes it straight onto the picture. screenrecord stops every 3 minutes, so it restarts by itself.
+ * The TV screen as live video in H.264, decoded straight onto the picture. It comes either from
+ * screenrecord through ADB (stops every 3 minutes, so it restarts by itself) or from Comando TV
+ * running on the TV itself and sharing its screen on port 8766 (boxes where ADB is locked).
  */
 final class LiveScreen {
     interface Events { void onFirstFrame(); void onFailed(); }
+    /** A running H.264 stream. */
+    interface Source { int read(byte[] b) throws java.io.IOException; void close(); }
+    /** Opens a new stream for each run. */
+    interface Opener { Source open() throws Exception; boolean alive(); }
 
     static final int W = 1280, H = 720;
-    private final AdbClient adb;
+    static final int SHARE_PORT = 8766;
+
+    static Opener adb(AdbClient a) {
+        return new Opener() {
+            @Override public Source open() throws Exception {
+                return a.execStream("screenrecord --output-format=h264 --size " + W + "x" + H + " --bit-rate 6000000 -");
+            }
+            @Override public boolean alive() { return a.connected(); }
+        };
+    }
+
+    static Opener tv(String host) {
+        return new Opener() {
+            @Override public Source open() throws Exception {
+                java.net.Socket s = new java.net.Socket();
+                s.connect(new java.net.InetSocketAddress(host, SHARE_PORT), 2000);
+                s.setTcpNoDelay(true);
+                java.io.InputStream in = s.getInputStream();
+                return new Source() {
+                    @Override public int read(byte[] b) throws java.io.IOException { return in.read(b); }
+                    @Override public void close() { try { s.close(); } catch (Exception ignored) { } }
+                };
+            }
+            @Override public boolean alive() { return true; }
+        };
+    }
+
+    private final Opener opener;
     private final Surface surface;
     private final Events events;
     private volatile boolean running;
-    private volatile AdbClient.Feed in;
+    private volatile Source in;
     private Thread thread;
 
-    LiveScreen(AdbClient adb, Surface surface, Events events) {
-        this.adb = adb;
+    LiveScreen(Opener opener, Surface surface, Events events) {
+        this.opener = opener;
         this.surface = surface;
         this.events = events;
     }
@@ -35,7 +67,7 @@ final class LiveScreen {
 
     void stop() {
         running = false;
-        AdbClient.Feed i = in;
+        Source i = in;
         if (i != null) try { i.close(); } catch (Exception ignored) { }
     }
 
@@ -44,7 +76,7 @@ final class LiveScreen {
     private void loop() {
         boolean everShown = false;
         int fails = 0;
-        while (running && adb.connected()) {
+        while (running && opener.alive()) {
             boolean shown = play();
             if (shown) { everShown = true; fails = 0; }
             else if (++fails >= (everShown ? 5 : 2)) { running = false; events.onFailed(); return; }
@@ -53,12 +85,12 @@ final class LiveScreen {
         running = false;
     }
 
-    /** One run of screenrecord; true if at least one picture was shown. */
+    /** One run of the stream; true if at least one picture was shown. */
     private boolean play() {
         MediaCodec codec = null;
         boolean shown = false;
         try {
-            in = adb.execStream("screenrecord --output-format=h264 --size " + W + "x" + H + " --bit-rate 6000000 -");
+            in = opener.open();
             codec = MediaCodec.createDecoderByType("video/avc");
             MediaFormat f = MediaFormat.createVideoFormat("video/avc", W, H);
             f.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);

@@ -79,6 +79,8 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     private android.view.TextureView video;
     private LiveScreen live;
     private boolean liveFailed;
+    /** We already asked the TV to open Comando TV (screen sharing) this session. */
+    private boolean askedTvShare;
     private TextView mirrorMsg;
     private GridLayout apps;
     private LinearLayout bgChips;
@@ -136,7 +138,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         hasLauncher = c.contains("L"); hasAtv = c.contains("G"); hasAdb = c.contains("A");
     }
 
-    private boolean canMirror() { return hasLauncher || hasAdb; }
+    private boolean canMirror() { return hasLauncher || hasAdb || hasAtv; }
 
     private String host() { return prefs.getString("host", ""); }
 
@@ -234,6 +236,18 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     private View remoteBlock() {
         LinearLayout col = vlay();
         Pad pad = new Pad(this);
+        pad.arrows = prefs.getBoolean("arrows", true);
+        LinearLayout modeRow = hlay();
+        modeRow.setGravity(Gravity.END);
+        TextView mode = chip(pad.arrows ? "Mudar para deslizar" : "Mudar para setas");
+        mode.setOnClickListener(v -> {
+            pad.arrows = !pad.arrows;
+            prefs.edit().putBoolean("arrows", pad.arrows).apply();
+            mode.setText(pad.arrows ? "Mudar para deslizar" : "Mudar para setas");
+            pad.invalidate();
+        });
+        modeRow.addView(mode, new LinearLayout.LayoutParams(-2, dp(32)));
+        col.addView(modeRow, lp(-1, -2, 0, 0, 0, dp(8)));
         col.addView(pad, new LinearLayout.LayoutParams(-1, wide() ? dp(190) : dp(270)));
 
         LinearLayout r1 = hlay();
@@ -560,6 +574,12 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         private long downAt;
         private boolean moved, longSent;
         boolean ghost;
+        /** Arrow buttons (tap the side to move, the middle for OK) instead of swiping. */
+        boolean arrows;
+        private int held = -1;
+        private final Runnable repeat = new Runnable() {
+            @Override public void run() { if (held < 0) return; send(held); postDelayed(this, 120); }
+        };
         private final Runnable longPress = () -> {
             if (moved) return;
             longSent = true;
@@ -582,6 +602,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             line.setColor(GLASS_LINE);
             c.drawRoundRect(box, dp(26), dp(26), line);
             float cx = getWidth() / 2f, cy = getHeight() / 2f, r = dp(36);
+            if (arrows) { drawArrows(c, cx, cy); return; }
             line.setColor(glow > 0 ? 0xFFFFFFFF : 0x40FFFFFF);
             c.drawCircle(cx, cy, r, line);
             int s = dp(20);
@@ -592,7 +613,68 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             for (Icon i : chev) i.draw(c);
         }
 
+        private final Icon[] big = {new Icon(Icon.UP, 0xFFFFFFFF), new Icon(Icon.DOWN, 0xFFFFFFFF), new Icon(Icon.LEFT, 0xFFFFFFFF), new Icon(Icon.RIGHT, 0xFFFFFFFF)};
+
+        private float ring() { return Math.min(getWidth(), getHeight()) / 2f - dp(12); }
+        private float okR() { return ring() * 0.36f; }
+
+        private void drawArrows(Canvas c, float cx, float cy) {
+            float R = ring(), r = okR();
+            line.setColor(0x40FFFFFF);
+            c.drawCircle(cx, cy, R, line);
+            fill.setColor(held == AtvClient.K_CENTER || glow > 0 ? 0x55FFFFFF : 0x22FFFFFF);
+            c.drawCircle(cx, cy, r, fill);
+            c.drawCircle(cx, cy, r, line);
+            Paint t = new Paint(Paint.ANTI_ALIAS_FLAG);
+            t.setColor(0xFFFFFFFF); t.setTextSize(dp(17)); t.setTextAlign(Paint.Align.CENTER);
+            t.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            c.drawText("OK", cx, cy + dp(6), t);
+            int s = dp(28);
+            float d = (R + r) / 2f;
+            int[] codes = {AtvClient.K_UP, AtvClient.K_DOWN, AtvClient.K_LEFT, AtvClient.K_RIGHT};
+            float[][] at = {{cx, cy - d}, {cx, cy + d}, {cx - d, cy}, {cx + d, cy}};
+            for (int i = 0; i < 4; i++) {
+                if (held == codes[i]) { fill.setColor(0x33FFFFFF); c.drawCircle(at[i][0], at[i][1], dp(26), fill); }
+                big[i].setBounds((int) at[i][0] - s / 2, (int) at[i][1] - s / 2, (int) at[i][0] + s / 2, (int) at[i][1] + s / 2);
+                big[i].draw(c);
+            }
+        }
+
+        /** Which button a finger is on in arrow mode. */
+        private int zone(float x, float y) {
+            float dx = x - getWidth() / 2f, dy = y - getHeight() / 2f;
+            if (Math.hypot(dx, dy) <= okR()) return AtvClient.K_CENTER;
+            if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? AtvClient.K_RIGHT : AtvClient.K_LEFT;
+            return dy > 0 ? AtvClient.K_DOWN : AtvClient.K_UP;
+        }
+
+        private boolean arrowTouch(MotionEvent e) {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    getParent().requestDisallowInterceptTouchEvent(true);
+                    held = zone(e.getX(), e.getY());
+                    longSent = false; moved = false;
+                    if (held == AtvClient.K_CENTER) postDelayed(longPress, 650);
+                    else { send(held); postDelayed(repeat, 450); }
+                    invalidate();
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    removeCallbacks(repeat); removeCallbacks(longPress);
+                    getParent().requestDisallowInterceptTouchEvent(false);
+                    if (held == AtvClient.K_CENTER && e.getActionMasked() == MotionEvent.ACTION_UP) {
+                        if (longSent) { if (client != null) client.key(AtvClient.K_CENTER, 2); }
+                        else send(AtvClient.K_CENTER);
+                    }
+                    held = -1;
+                    invalidate();
+                    return true;
+            }
+            return true;
+        }
+
         @Override public boolean onTouchEvent(MotionEvent e) {
+            if (arrows && !ghost) return arrowTouch(e);
             float step = dp(44);
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
@@ -777,8 +859,9 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             ui.removeCallbacks(this);
             if (!visible || !mirrorOn || mirror == null || mirrorBusy) return;
             AdbClient a = adb;
-            if (a != null && a.connected() && !liveFailed) { startLive(a); return; }
+            if (a != null && a.connected() && !liveFailed) { startLive(LiveScreen.adb(a), true); return; }
             if (live != null && live.running()) return;
+            if (!hasLauncher && !hasAdb) { startLive(LiveScreen.tv(host()), false); return; } // Comando TV on the TV shares its screen
             mirrorBusy = true;
             if (!hasLauncher) { mirrorAdb(); return; }
             http("/shot.jpg", b -> {
@@ -792,7 +875,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     };
 
     /** Starts the live video of the TV screen (about 30 pictures per second). */
-    private void startLive(AdbClient a) {
+    private void startLive(LiveScreen.Opener source, boolean viaAdb) {
         if (live != null && live.running()) return;
         android.graphics.SurfaceTexture st = video.getSurfaceTexture();
         video.setVisibility(View.VISIBLE);
@@ -808,9 +891,22 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         st.setDefaultBufferSize(LiveScreen.W, LiveScreen.H);
         mirrorMsg.setVisibility(View.VISIBLE);
         mirrorMsg.setText("A ligar ao ecrã da TV…");
-        live = new LiveScreen(a, new android.view.Surface(st), new LiveScreen.Events() {
-            @Override public void onFirstFrame() { ui.post(() -> { if (mirror == null) return; mirror.setVisibility(View.GONE); mirrorMsg.setVisibility(View.GONE); }); }
-            @Override public void onFailed() { ui.post(() -> { // this box cannot record its screen: go back to pictures
+        live = new LiveScreen(source, new android.view.Surface(st), new LiveScreen.Events() {
+            @Override public void onFirstFrame() { ui.post(() -> {
+                if (!viaAdb) loadApps(); // Comando TV on the TV can now list every app
+                if (mirror == null) return;
+                mirror.setVisibility(View.GONE); mirrorMsg.setVisibility(View.GONE);
+            }); }
+            @Override public void onFailed() { ui.post(() -> {
+                if (!viaAdb) { // Comando TV is not sharing yet: open it on the TV and keep trying
+                    if (mirrorMsg == null) return;
+                    mirrorMsg.setVisibility(View.VISIBLE);
+                    mirrorMsg.setText("Para veres o ecrã aqui, instala o Comando TV também na TV.\nDepois abre-o na TV e escolhe «Começar agora».");
+                    if (!askedTvShare && client != null && client.connected()) { askedTvShare = true; client.open("com.antunes.remote"); }
+                    ui.postDelayed(mirrorLoop, 4000);
+                    return;
+                }
+                // this box cannot record its screen: go back to pictures
                 liveFailed = true;
                 if (video != null) video.setVisibility(View.GONE);
                 if (mirror != null) mirror.setVisibility(View.VISIBLE);
@@ -1118,8 +1214,23 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         AdbClient a = adb;
         if (a == null || !a.connected()) {
             if (hasAdb) return; // waits for ADB to connect
-            JSONArray arr = new JSONArray();
-            try { for (String[] k : KNOWN) arr.put(new JSONObject().put("pkg", k[0]).put("label", k[1])); fillApps(arr.toString()); } catch (Exception ignored) { }
+            String h = host();
+            new Thread(() -> { // Comando TV on the TV knows every app it has; otherwise the common ones
+                String json = null;
+                try {
+                    HttpURLConnection c = (HttpURLConnection) new URL("http://" + h + ":8767/apps").openConnection();
+                    c.setConnectTimeout(1500);
+                    c.setReadTimeout(8000);
+                    if (c.getResponseCode() == 200) json = str(readAll(c.getInputStream()));
+                } catch (Exception ignored) { }
+                if (json == null) {
+                    JSONArray arr = new JSONArray();
+                    try { for (String[] k : KNOWN) arr.put(new JSONObject().put("pkg", k[0]).put("label", k[1])); } catch (Exception ignored) { }
+                    json = arr.toString();
+                }
+                String j = json;
+                ui.post(() -> { try { fillApps(j); } catch (Exception ignored) { } });
+            }).start();
             return;
         }
         new Thread(() -> {
