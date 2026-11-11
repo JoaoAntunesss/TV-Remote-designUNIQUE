@@ -24,7 +24,7 @@ import javax.net.ssl.X509TrustManager;
  * Talks to the TV's built-in "Android TV Remote Service" (the same one the Google TV phone app uses):
  * port 6467 to pair once with the code shown on the TV, port 6466 to send keys, text and open apps.
  */
-final class AtvClient {
+final class AtvClient implements Remote {
     interface Listener {
         void onState(String state, boolean connected);
     }
@@ -164,7 +164,7 @@ final class AtvClient {
     // ------------------------------------------------------------ remote control (port 6466)
 
     /** Connects and keeps the session alive; reconnects if the connection drops. */
-    void run() {
+    public void run() {
         running = true;
         int fails = 0;
         while (running) {
@@ -208,13 +208,13 @@ final class AtvClient {
         }
     }
 
-    void stop() {
+    public void stop() {
         running = false;
         try { if (remote != null) remote.close(); } catch (IOException ignored) { }
         try { if (pairing != null) pairing.close(); } catch (IOException ignored) { }
     }
 
-    boolean connected() { return remoteOut != null; }
+    public boolean connected() { return remoteOut != null; }
 
     private void send(Pb m) {
         OutputStream o = remoteOut;
@@ -223,18 +223,17 @@ final class AtvClient {
     }
 
     /** direction: 1 = press, 2 = release, 3 = short press */
-    void key(int code, int direction) { send(new Pb().msg(10, new Pb().num(1, code).num(2, direction))); }
+    public void key(int code, int direction) { send(new Pb().msg(10, new Pb().num(1, code).num(2, direction))); }
 
-    void key(int code) { key(code, 3); }
 
     /** Opens an app (by package) or a link on the TV. */
-    void open(String pkgOrLink) {
+    public void open(String pkgOrLink) {
         String link = pkgOrLink.contains("://") ? pkgOrLink : "market://launch?id=" + pkgOrLink;
         send(new Pb().msg(90, new Pb().str(1, link)));
     }
 
     /** Types text into the field that is open on the TV (search boxes, logins). Replaces what is there. */
-    void type(String text) {
+    public void type(String text) {
         int n = text.length();
         send(new Pb().msg(21, new Pb().num(1, imeCounter).num(2, fieldCounter)
                 .msg(3, new Pb().num(1, 1).msg(2, new Pb().num(1, Math.max(0, n - 1)).num(2, Math.max(0, n - 1)).str(3, text)))));

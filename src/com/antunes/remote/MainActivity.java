@@ -67,7 +67,11 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     private static final Locale PT = new Locale("pt", "PT");
     private final Handler ui = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
-    private AtvClient client;
+    private Remote client;
+    /** ADB to boxes without our home screen (keys too, when the box has no Google remote service). */
+    private AdbClient adb;
+    /** What this TV can do: our home screen (8765), Google's remote service (6466), network ADB (5555). */
+    private boolean hasLauncher, hasAtv, hasAdb;
     private TextView status, clock, date, nowTitle, nowSub;
     private View dot, nowCard;
     private ImageView nowArt, mirror;
@@ -87,6 +91,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         mirrorOn = prefs.getBoolean("mirror", false);
+        loadCaps();
         setContentView(build());
         showCachedApps();
     }
@@ -116,8 +121,17 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         visible = false;
         if (client != null) client.stop();
         client = null;
+        if (adb != null) adb.stop();
+        adb = null;
         stopDiscovery();
     }
+
+    private void loadCaps() {
+        String c = prefs.getString("caps:" + host(), "L");
+        hasLauncher = c.contains("L"); hasAtv = c.contains("G"); hasAdb = c.contains("A");
+    }
+
+    private boolean canMirror() { return hasLauncher || hasAdb; }
 
     private String host() { return prefs.getString("host", ""); }
 
@@ -159,7 +173,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             col.setPadding(dp(18), dp(12), dp(18), dp(24));
             sv.addView(col);
             col.addView(header());
-            col.addView(mirrorBlock(), lp(-1, -2, 0, dp(14), 0, 0));
+            if (canMirror()) col.addView(mirrorBlock(), lp(-1, -2, 0, dp(14), 0, 0));
             col.addView(remoteBlock(), lp(-1, -2, 0, dp(14), 0, 0));
             extrasNoMirror(col);
             root.addView(sv, new FrameLayout.LayoutParams(-1, -1));
@@ -256,7 +270,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     }
 
     private void extras(LinearLayout col) {
-        col.addView(mirrorBlock());
+        if (canMirror()) col.addView(mirrorBlock());
         extrasNoMirror(col);
     }
 
@@ -290,13 +304,18 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         col.addView(section("Na TV"));
         GridLayout g = new GridLayout(this);
         g.setColumnCount(wide() ? 3 : 2);
-        Object[][] acts = {
+        Object[][] acts = hasLauncher ? new Object[][]{
             {Icon.FIRE, "Lareira", (Runnable) () -> tvDo("fire")},
             {Icon.CLOCK, "Relógio", (Runnable) () -> tvDo("clock")},
             {Icon.INPUT, "Fontes · HDMI", (Runnable) () -> pickInput(false)},
             {Icon.SPLIT, "Ecrã dividido", (Runnable) () -> pickInput(true)},
             {Icon.APPS, "Todas as apps", (Runnable) () -> tvDo("apps")},
             {Icon.GEAR, "Definições", (Runnable) () -> key(AtvClient.K_SETTINGS)},
+        } : new Object[][]{ // any Android TV or box
+            {Icon.INPUT, "Fontes · HDMI", (Runnable) () -> key(AtvClient.K_TV_INPUT)},
+            {Icon.APPS, "Todas as apps", (Runnable) () -> key(K_ALL_APPS)},
+            {Icon.GEAR, "Definições", (Runnable) () -> key(AtvClient.K_SETTINGS)},
+            {Icon.HOME, "Ecrã inicial", (Runnable) () -> key(AtvClient.K_HOME)},
         };
         int cols = wide() ? 3 : 2;
         int cw = (contentWidth() - dp(10) * (cols - 1)) / cols;
@@ -310,9 +329,9 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         }
         col.addView(g);
 
-        // background theme of the TV home screen
-        col.addView(section("Fundo do ecrã inicial"));
+        // background theme of the TV home screen (only with our home screen)
         bgChips = hlay();
+        if (hasLauncher) col.addView(section("Fundo do ecrã inicial"));
         String[][] modes = {{"canal", "Canal"}, {"lareira", "Lareira"}, {"fotos", "Fotos"}};
         for (String[] m : modes) {
             TextView c = chip(m[1]);
@@ -321,10 +340,10 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             bgChips.addView(c, lp(-2, dp(36), 0, 0, dp(8), 0));
         }
         markBg(prefs.getString("bg", ""));
-        col.addView(bgChips);
+        if (hasLauncher) col.addView(bgChips);
 
         // apps
-        col.addView(section("Apps"));
+        col.addView(section(hasLauncher || hasAdb ? "Apps" : "Apps conhecidas"));
         apps = new GridLayout(this);
         apps.setColumnCount(wide() ? 4 : 3);
         col.addView(apps, new LinearLayout.LayoutParams(-1, -2));
@@ -610,6 +629,8 @@ public class MainActivity extends Activity implements AtvClient.Listener {
 
     // ------------------------------------------------------------ talking to the TV
 
+    static final int K_ALL_APPS = 284;
+
     private void key(int code) {
         if (client == null || !client.connected()) { toast("A TV não está ligada"); return; }
         client.key(code);
@@ -633,7 +654,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     /** HTTP to the TV home screen (port 8765). Callback gets null on failure. */
     private void http(String path, java.util.function.Consumer<byte[]> done) {
         String h = host();
-        if (h.isEmpty()) { if (done != null) done.accept(null); return; }
+        if (h.isEmpty() || !hasLauncher) { if (done != null) ui.post(() -> done.accept(null)); return; }
         new Thread(() -> {
             byte[] out = null;
             try {
@@ -690,6 +711,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     }
 
     private void refreshTv() {
+        if (!hasLauncher) { refreshTvAdb(); return; }
         http("/now", b -> {
             try {
                 JSONObject o = new JSONObject(str(b));
@@ -710,6 +732,26 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         });
     }
 
+    /** "A dar na TV" read from the box's media sessions over ADB. */
+    private void refreshTvAdb() {
+        AdbClient a = adb;
+        if (a == null || !a.connected() || nowCard == null) { if (nowCard != null) nowCard.setVisibility(View.GONE); return; }
+        new Thread(() -> {
+            String[] n = null;
+            try { n = a.nowPlaying(); } catch (Exception ignored) { }
+            String[] r = n;
+            ui.post(() -> {
+                if (nowCard == null) return;
+                nowCard.setVisibility(r == null ? View.GONE : View.VISIBLE);
+                if (r == null) return;
+                nowTitle.setText(r[0]);
+                nowSub.setText(r[1].isEmpty() ? appName(r[2]) : r[1]);
+                nowArt.setImageBitmap(letterTile(appName(r[2])));
+                nowCard.setOnClickListener(v -> { if (client != null) client.open(r[2]); });
+            });
+        }).start();
+    }
+
     private final Runnable nowLoop = new Runnable() {
         @Override public void run() {
             if (!visible) return;
@@ -725,6 +767,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             ui.removeCallbacks(this);
             if (!visible || !mirrorOn || mirror == null || mirrorBusy) return;
             mirrorBusy = true;
+            if (!hasLauncher) { mirrorAdb(); return; }
             http("/shot.jpg", b -> {
                 mirrorBusy = false;
                 Bitmap bm = b == null ? null : BitmapFactory.decodeByteArray(b, 0, b.length);
@@ -735,22 +778,103 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         }
     };
 
+    /** Screenshot through ADB: slower than our home screen, about one picture per second. */
+    private void mirrorAdb() {
+        AdbClient a = adb;
+        new Thread(() -> {
+            Bitmap bm = null;
+            if (a != null && a.connected()) try {
+                byte[] png = a.screenshot();
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inSampleSize = 2;
+                bm = BitmapFactory.decodeByteArray(png, 0, png.length, o);
+            } catch (Exception ignored) { }
+            Bitmap r = bm;
+            ui.post(() -> {
+                mirrorBusy = false;
+                if (mirror == null) return;
+                if (r != null) { mirror.setImageBitmap(r); mirrorMsg.setVisibility(View.GONE); }
+                else { mirrorMsg.setVisibility(View.VISIBLE); mirrorMsg.setText("A ligar à box…\nNa TV, aceita «Permitir depuração» se aparecer."); }
+                ui.postDelayed(mirrorLoop, r != null ? 300 : 3000);
+            });
+        }).start();
+    }
+
     // ------------------------------------------------------------ connection
 
+    private static boolean portOpen(String host, int port, int ms) {
+        try (java.net.Socket s = new java.net.Socket()) { s.connect(new java.net.InetSocketAddress(host, port), ms); return true; }
+        catch (Exception e) { return false; }
+    }
+
+    private static boolean launcherAt(String host) {
+        try {
+            HttpURLConnection c = (HttpURLConnection) new URL("http://" + host + ":8765/now").openConnection();
+            c.setConnectTimeout(1500);
+            c.setReadTimeout(3000);
+            return c.getResponseCode() == 200;
+        } catch (Exception e) { return false; }
+    }
+
+    /** Finds out what this TV or box can do, then talks to it the best way it allows. */
     private void connect(String host) {
         if (client != null) client.stop();
-        AtvClient c = new AtvClient(host, this);
-        client = c;
-        new Thread(c::run).start();
+        if (adb != null) adb.stop();
+        client = null; adb = null;
+        status.setText("A ligar…");
+        new Thread(() -> {
+            boolean g = portOpen(host, 6466, 2000), l = launcherAt(host), a = portOpen(host, AdbClient.PORT, 1500);
+            ui.post(() -> {
+                if (!host.equals(host()) || !visible) return;
+                boolean changed = g != hasAtv || l != hasLauncher || a != hasAdb;
+                hasAtv = g; hasLauncher = l; hasAdb = a;
+                if (g || l || a) prefs.edit().putString("caps:" + host, (l ? "L" : "") + (g ? "G" : "") + (a ? "A" : "")).apply();
+                if (changed) { setContentView(build()); showCachedApps(); }
+                start(host);
+            });
+        }).start();
+    }
+
+    private void start(String host) {
+        if (hasAtv || !hasAdb) {
+            AtvClient c = new AtvClient(host, this);
+            client = c;
+            new Thread(c::run).start();
+        }
+        if (hasAdb && !hasLauncher) { // ADB gives keys (if needed), apps, picture and what is playing
+            boolean primary = client == null;
+            AdbClient a = new AdbClient(host, primary ? this : (state, ok) -> {
+                if ("ALLOW".equals(state)) ui.post(this::allowDebugging);
+                if (ok) ui.post(() -> { loadApps(); refreshTv(); ui.post(mirrorLoop); });
+            });
+            adb = a;
+            if (primary) client = a;
+            new Thread(a::run).start();
+        }
         loadApps();
         ui.removeCallbacks(nowLoop);
         ui.post(nowLoop);
+        ui.post(mirrorLoop);
+    }
+
+    private boolean allowShown;
+
+    private void allowDebugging() {
+        if (allowShown) return;
+        allowShown = true;
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Aceita na TV")
+                .setMessage("Na TV aparece «Permitir depuração?». Marca «Permitir sempre a partir deste computador» e carrega em OK. Só é preciso uma vez.")
+                .setPositiveButton("OK", (d, w) -> allowShown = false)
+                .show();
     }
 
     @Override
     public void onState(String state, boolean connected) {
         ui.post(() -> {
             if ("PAIR".equals(state)) { pair(); return; }
+            if ("ALLOW".equals(state)) { allowDebugging(); status.setText("Aceita na TV…"); return; }
+            if (connected && client == adb && adb != null) { loadApps(); refreshTv(); ui.post(mirrorLoop); }
             status.setText(connected ? prefs.getString("name", "TV") : state);
             ((GradientDrawable) dot.getBackground()).setColor(connected ? GREEN : 0xFF777777);
         });
@@ -830,7 +954,50 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             }
         };
         nsd.discoverServices("_androidtvremote2._tcp.", NsdManager.PROTOCOL_DNS_SD, discovery);
-        ui.postDelayed(() -> { if (host().isEmpty()) status.setText("TV não encontrada · toca aqui"); }, 12_000);
+        // boxes without Google's service do not announce themselves: look for them on the network
+        ui.postDelayed(() -> { if (host().isEmpty() && visible) scanNetwork(); }, 4000);
+    }
+
+    /** Tries every address on the Wi-Fi for Google's remote service (6466) and network ADB (5555). */
+    private void scanNetwork() {
+        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+        @SuppressWarnings("deprecation") int ip = wm.getConnectionInfo().getIpAddress();
+        if (ip == 0) { status.setText("Liga o telemóvel ao Wi-Fi da TV"); return; }
+        String base = (ip & 0xFF) + "." + ((ip >> 8) & 0xFF) + "." + ((ip >> 16) & 0xFF) + ".";
+        String me = base + ((ip >> 24) & 0xFF);
+        status.setText("A procurar na rede…");
+        new Thread(() -> {
+            java.util.List<String[]> found = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            java.util.concurrent.ExecutorService ex = java.util.concurrent.Executors.newFixedThreadPool(48);
+            for (int i = 1; i < 255; i++) {
+                String h = base + i;
+                if (h.equals(me)) continue;
+                ex.execute(() -> {
+                    boolean g = portOpen(h, 6466, 400), a = !g && portOpen(h, AdbClient.PORT, 400);
+                    if (g || a) found.add(new String[]{h, g ? "Android TV / Google TV" : "Box Android (ADB)"});
+                });
+            }
+            ex.shutdown();
+            try { ex.awaitTermination(20, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+            ui.post(() -> {
+                if (!host().isEmpty() || !visible) return;
+                if (found.isEmpty()) { status.setText("TV não encontrada · toca aqui"); return; }
+                if (found.size() == 1) { useTv(found.get(0)[0], found.get(0)[1]); return; }
+                String[] items = new String[found.size()];
+                for (int i = 0; i < items.length; i++) items[i] = found.get(i)[1] + "  ·  " + found.get(i)[0];
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Qual é a TV?")
+                        .setItems(items, (d, w) -> useTv(found.get(w)[0], found.get(w)[1]))
+                        .show();
+            });
+        }).start();
+    }
+
+    private void useTv(String host, String name) {
+        prefs.edit().putString("host", host).putString("name", name.startsWith("Box") ? "Box Android" : "TV").apply();
+        stopDiscovery();
+        loadCaps();
+        connect(host);
     }
 
     private void stopDiscovery() {
@@ -845,14 +1012,17 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         ip.setText(host());
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("TV")
-                .setMessage("Endereço IP da TV (na TV: Definições › Rede). Deixa vazio para procurar.")
+                .setMessage("Endereço IP da TV ou da box (na TV: Definições › Rede). Deixa vazio para procurar.\n\n"
+                        + "Box Android que não aparece? Na box: Definições › Acerca › carrega 7 vezes em «Compilação»; "
+                        + "depois em Opções de programador liga «Depuração USB» e «Depuração por rede» (ADB por Wi-Fi).")
                 .setView(ip)
                 .setPositiveButton("OK", (d, w) -> {
                     String h = ip.getText().toString().trim();
                     prefs.edit().putString("host", h).apply();
+                    loadCaps();
                     if (h.isEmpty()) discover(); else connect(h);
                 })
-                .setNeutralButton("Emparelhar de novo", (d, w) -> pair())
+                .setNeutralButton(hasAtv || !hasAdb ? "Emparelhar de novo" : "Pedir autorização", (d, w) -> { if (hasAtv || !hasAdb) pair(); else connect(host()); })
                 .setNegativeButton("Cancelar", null)
                 .show();
     }
@@ -862,17 +1032,78 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     private File cache() { return new File(getFilesDir(), "apps.json"); }
 
     private void showCachedApps() {
+        if (!hasLauncher) { loadApps(); return; }
         try (InputStream in = new FileInputStream(cache())) { fillApps(new String(readAll(in), StandardCharsets.UTF_8)); }
         catch (Exception ignored) { }
     }
 
     private void loadApps() {
+        if (!hasLauncher) { loadAppsNoLauncher(); return; }
         http("/apps", b -> {
             if (b == null) return;
             String json = str(b);
             try (FileOutputStream o = new FileOutputStream(cache())) { o.write(b); } catch (Exception ignored) { }
             try { fillApps(json); } catch (Exception ignored) { }
         });
+    }
+
+    /** Common apps on Android TV; opened by package (only works if the app is installed on the TV). */
+    private static final String[][] KNOWN = {
+        {"com.netflix.ninja", "Netflix"}, {"com.google.android.youtube.tv", "YouTube"},
+        {"com.amazon.amazonvideo.livingroom", "Prime Video"}, {"com.disney.disneyplus", "Disney+"},
+        {"com.wbd.stream", "Max"}, {"com.spotify.tv.android", "Spotify"}, {"com.plexapp.android", "Plex"},
+        {"org.xbmc.kodi", "Kodi"}, {"com.google.android.youtube.tvmusic", "YouTube Music"},
+        {"com.apple.atve.androidtv.appletv", "Apple TV"}, {"com.antunes.player", "AntunesPlayer"},
+        {"com.android.vending", "Play Store"}, {"com.google.android.videos", "Google TV"},
+    };
+
+    static String appName(String pkg) {
+        for (String[] k : KNOWN) if (k[0].equals(pkg)) return k[1];
+        String[] parts = pkg.split("\\.");
+        String last = parts[parts.length - 1];
+        if (parts.length > 1 && (last.equals("tv") || last.equals("android") || last.equals("app") || last.equals("ninja") || last.equals("livingroom")))
+            last = parts[parts.length - 2];
+        return last.isEmpty() ? pkg : Character.toUpperCase(last.charAt(0)) + last.substring(1);
+    }
+
+    private void loadAppsNoLauncher() {
+        AdbClient a = adb;
+        if (a == null || !a.connected()) {
+            if (hasAdb) return; // waits for ADB to connect
+            JSONArray arr = new JSONArray();
+            try { for (String[] k : KNOWN) arr.put(new JSONObject().put("pkg", k[0]).put("label", k[1])); fillApps(arr.toString()); } catch (Exception ignored) { }
+            return;
+        }
+        new Thread(() -> {
+            try {
+                java.util.List<String> list = a.apps();
+                JSONArray arr = new JSONArray();
+                for (String pkg : list) {
+                    if (pkg.startsWith("com.android.") && !pkg.equals("com.android.vending")) continue;
+                    arr.put(new JSONObject().put("pkg", pkg).put("label", appName(pkg)));
+                }
+                String json = arr.toString();
+                ui.post(() -> { try { fillApps(json); } catch (Exception ignored) { } });
+            } catch (Exception ignored) { }
+        }).start();
+    }
+
+    /** Coloured square with the first letter, for apps without a picture. */
+    private Bitmap letterTile(String label) {
+        int w = 320, h = 180;
+        Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        int[] colors = {0xFF1F6F8B, 0xFF6C3FB5, 0xFFB5523F, 0xFF2E8B57, 0xFF8B6B1F, 0xFF3F5BB5};
+        c.drawColor(colors[Math.abs(label.hashCode()) % colors.length]);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(0xFFFFFFFF);
+        p.setTextSize(64);
+        p.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        p.setTextAlign(Paint.Align.CENTER);
+        String t = label.isEmpty() ? "?" : label.length() > 10 ? label.substring(0, 1).toUpperCase(PT) : label;
+        if (p.measureText(t) > w - 30) p.setTextSize(64f * (w - 30) / p.measureText(t));
+        c.drawText(t, w / 2f, h / 2f - (p.descent() + p.ascent()) / 2, p);
+        return b;
     }
 
     private static byte[] readAll(InputStream in) throws java.io.IOException {
@@ -897,7 +1128,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             img.setScaleType(ImageView.ScaleType.CENTER_CROP);
             byte[] jpg = Base64.decode(o.optString("img", ""), Base64.DEFAULT);
             Bitmap bm = BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
-            if (bm != null) img.setImageBitmap(bm);
+            img.setImageBitmap(bm != null ? bm : letterTile(o.optString("label", pkg)));
             img.setBackground(glass(dp(12)));
             clip(img, dp(12));
             cell.addView(img, new LinearLayout.LayoutParams(w, w * 9 / 16));
