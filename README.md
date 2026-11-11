@@ -21,7 +21,7 @@ fundo escuro com brilho, vidro, branco quando se carrega.
 |---|---|
 | O ecrã inicial **TV-Debloat-designUNIQUE** | Tudo: lareira, relógio, fontes, ecrã dividido, fundo, apps com imagem, ecrã da TV, «A dar na TV». |
 | Google TV / Android TV (serviço de comando da Google) | Comando completo, escrever, abrir apps conhecidas (Netflix, YouTube, Prime Video, Disney+…), fontes, definições. |
-| **Depuração por rede (ADB)** ligada, por exemplo numa box Android | Comando completo e ainda: lista das apps instaladas, ecrã da TV no telemóvel (cerca de 1 imagem por segundo) e «A dar na TV». |
+| **Depuração por rede (ADB)** ligada, por exemplo numa box Android | Comando completo e ainda: lista das apps instaladas, ecrã da TV no telemóvel em vídeo, fluido (se a box não deixar gravar o ecrã, passa a imagens) e «A dar na TV». |
 
 A app descobre sozinha o que cada TV ou box consegue e mostra só as funções que lá funcionam.
 
