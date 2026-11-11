@@ -75,6 +75,10 @@ public class MainActivity extends Activity implements AtvClient.Listener {
     private TextView status, clock, date, nowTitle, nowSub;
     private View dot, nowCard;
     private ImageView nowArt, mirror;
+    /** Live video of the TV screen (through ADB); the still picture is the fallback. */
+    private android.view.TextureView video;
+    private LiveScreen live;
+    private boolean liveFailed;
     private TextView mirrorMsg;
     private GridLayout apps;
     private LinearLayout bgChips;
@@ -121,6 +125,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         visible = false;
         if (client != null) client.stop();
         client = null;
+        stopLive();
         if (adb != null) adb.stop();
         adb = null;
         stopDiscovery();
@@ -366,6 +371,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             prefs.edit().putBoolean("mirror", mirrorOn).apply();
             sw.setText(mirrorOn ? "Esconder" : "Ver aqui");
             ((View) mirror.getParent()).setVisibility(mirrorOn ? View.VISIBLE : View.GONE);
+            if (!mirrorOn) stopLive();
             ui.post(mirrorLoop);
         });
         top.addView(sw, new LinearLayout.LayoutParams(-2, dp(32)));
@@ -378,6 +384,10 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         };
         box.setBackground(glass(dp(16)));
         clip(box, dp(16));
+        stopLive();
+        video = new android.view.TextureView(this);
+        video.setVisibility(View.GONE);
+        box.addView(video, new FrameLayout.LayoutParams(-1, -1));
         mirror = new ImageView(this);
         mirror.setScaleType(ImageView.ScaleType.FIT_CENTER);
         box.addView(mirror, new FrameLayout.LayoutParams(-1, -1));
@@ -766,6 +776,9 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         @Override public void run() {
             ui.removeCallbacks(this);
             if (!visible || !mirrorOn || mirror == null || mirrorBusy) return;
+            AdbClient a = adb;
+            if (a != null && a.connected() && !liveFailed) { startLive(a); return; }
+            if (live != null && live.running()) return;
             mirrorBusy = true;
             if (!hasLauncher) { mirrorAdb(); return; }
             http("/shot.jpg", b -> {
@@ -777,6 +790,40 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             });
         }
     };
+
+    /** Starts the live video of the TV screen (about 30 pictures per second). */
+    private void startLive(AdbClient a) {
+        if (live != null && live.running()) return;
+        android.graphics.SurfaceTexture st = video.getSurfaceTexture();
+        video.setVisibility(View.VISIBLE);
+        if (st == null) { // the video surface is created once it is on screen
+            video.setSurfaceTextureListener(new android.view.TextureView.SurfaceTextureListener() {
+                @Override public void onSurfaceTextureAvailable(android.graphics.SurfaceTexture t, int w, int h) { ui.post(mirrorLoop); }
+                @Override public void onSurfaceTextureSizeChanged(android.graphics.SurfaceTexture t, int w, int h) { }
+                @Override public boolean onSurfaceTextureDestroyed(android.graphics.SurfaceTexture t) { stopLive(); return true; }
+                @Override public void onSurfaceTextureUpdated(android.graphics.SurfaceTexture t) { }
+            });
+            return;
+        }
+        st.setDefaultBufferSize(LiveScreen.W, LiveScreen.H);
+        mirrorMsg.setVisibility(View.VISIBLE);
+        mirrorMsg.setText("A ligar ao ecrã da TV…");
+        live = new LiveScreen(a, new android.view.Surface(st), new LiveScreen.Events() {
+            @Override public void onFirstFrame() { ui.post(() -> { if (mirror == null) return; mirror.setVisibility(View.GONE); mirrorMsg.setVisibility(View.GONE); }); }
+            @Override public void onFailed() { ui.post(() -> { // this box cannot record its screen: go back to pictures
+                liveFailed = true;
+                if (video != null) video.setVisibility(View.GONE);
+                if (mirror != null) mirror.setVisibility(View.VISIBLE);
+                ui.post(mirrorLoop);
+            }); }
+        });
+        live.start();
+    }
+
+    private void stopLive() {
+        if (live != null) live.stop();
+        live = null;
+    }
 
     /** Screenshot through ADB: slower than our home screen, about one picture per second. */
     private void mirrorAdb() {
@@ -841,7 +888,8 @@ public class MainActivity extends Activity implements AtvClient.Listener {
             client = c;
             new Thread(c::run).start();
         }
-        if (hasAdb && !hasLauncher) { // ADB gives keys (if needed), apps, picture and what is playing
+        liveFailed = false;
+        if (hasAdb) { // ADB gives keys (if needed), apps, live picture and what is playing
             boolean primary = client == null;
             AdbClient a = new AdbClient(host, primary ? this : (state, ok) -> {
                 if ("ALLOW".equals(state)) ui.post(this::allowDebugging);

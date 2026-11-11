@@ -176,6 +176,34 @@ final class AdbClient implements Remote {
         return s.all.toByteArray();
     }
 
+    /** Starts a command and gives its output as it arrives (for the live video of the screen). */
+    java.io.InputStream execStream(String cmd) throws Exception {
+        if (!ready) throw new IOException("not connected");
+        Stream s = open("exec:" + cmd, 5000);
+        return new java.io.InputStream() {
+            byte[] cur; int pos; boolean done;
+            @Override public int read() throws IOException { byte[] one = new byte[1]; return read(one, 0, 1) < 0 ? -1 : one[0] & 0xFF; }
+            @Override public int read(byte[] b, int off, int len) throws IOException {
+                while (cur == null || pos >= cur.length) {
+                    if (done || (s.closed && s.in.isEmpty())) return -1;
+                    try { cur = s.in.poll(500, TimeUnit.MILLISECONDS); } catch (InterruptedException e) { throw new IOException(e); }
+                    pos = 0;
+                    if (!ready) return -1;
+                }
+                int n = Math.min(len, cur.length - pos);
+                System.arraycopy(cur, pos, b, off, n);
+                pos += n;
+                return n;
+            }
+            @Override public void close() {
+                if (done) return;
+                done = true;
+                try { if (!s.closed) write(CLSE, s.local, s.remote, null); } catch (IOException ignored) { }
+                streams.remove(s.local);
+            }
+        };
+    }
+
     String sh(String cmd) throws Exception { return new String(exec(cmd, 15_000), StandardCharsets.UTF_8); }
 
     // ------------------------------------------------------------ connection
