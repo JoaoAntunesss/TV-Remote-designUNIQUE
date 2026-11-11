@@ -4,7 +4,6 @@ import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.view.Surface;
 
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 
 /**
@@ -19,7 +18,7 @@ final class LiveScreen {
     private final Surface surface;
     private final Events events;
     private volatile boolean running;
-    private volatile InputStream in;
+    private volatile AdbClient.Feed in;
     private Thread thread;
 
     LiveScreen(AdbClient adb, Surface surface, Events events) {
@@ -36,7 +35,7 @@ final class LiveScreen {
 
     void stop() {
         running = false;
-        InputStream i = in;
+        AdbClient.Feed i = in;
         if (i != null) try { i.close(); } catch (Exception ignored) { }
     }
 

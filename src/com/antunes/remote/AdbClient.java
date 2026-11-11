@@ -177,26 +177,22 @@ final class AdbClient implements Remote {
     }
 
     /** Starts a command and gives its output as it arrives (for the live video of the screen). */
-    java.io.InputStream execStream(String cmd) throws Exception {
+    Feed execStream(String cmd) throws Exception {
         if (!ready) throw new IOException("not connected");
-        return new ExecIn(open("exec:" + cmd, 5000));
+        return new Feed(open("exec:" + cmd, 5000));
     }
 
     /** Output of a running command, read as it arrives. */
-    private final class ExecIn extends java.io.InputStream {
+    final class Feed {
         private final Stream st;
         private byte[] cur;
         private int pos;
         private boolean done;
 
-        ExecIn(Stream st) { this.st = st; }
+        Feed(Stream st) { this.st = st; }
 
-        @Override public int read() throws IOException {
-            byte[] one = new byte[1];
-            return read(one, 0, 1) < 0 ? -1 : one[0] & 0xFF;
-        }
-
-        @Override public int read(byte[] b, int off, int len) throws IOException {
+        int read(byte[] b) throws IOException {
+            int off = 0, len = b.length;
             while (cur == null || pos >= cur.length) {
                 if (done || (st.closed && st.in.isEmpty()) || !ready) return -1;
                 try { cur = st.in.poll(500, TimeUnit.MILLISECONDS); } catch (InterruptedException e) { throw new IOException(e); }
@@ -208,7 +204,7 @@ final class AdbClient implements Remote {
             return n;
         }
 
-        @Override public void close() {
+        void close() {
             if (done) return;
             done = true;
             try { if (!st.closed) write(CLSE, st.local, st.remote, null); } catch (IOException ignored) { }
