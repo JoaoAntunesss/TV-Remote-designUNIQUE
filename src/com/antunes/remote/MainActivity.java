@@ -3,6 +3,7 @@ package com.antunes.remote;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -15,6 +16,7 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
+import android.net.Uri;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
@@ -36,6 +38,7 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
+import android.widget.ProgressBar;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -54,7 +57,9 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -100,6 +105,14 @@ public class MainActivity extends Activity implements AtvClient.Listener {
         loadCaps();
         setContentView(build());
         showCachedApps();
+        takeShare(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        setIntent(i);
+        takeShare(i);
     }
 
     @Override
@@ -321,6 +334,7 @@ public class MainActivity extends Activity implements AtvClient.Listener {
 
         // TV functions
         col.addView(section("Na TV"));
+        col.addView(tile(Icon.CAST, "Enviar para a TV · fotos, vídeos, ficheiros", this::sendMenu), lp(-1, dp(52), 0, 0, 0, dp(10)));
         GridLayout g = new GridLayout(this);
         g.setColumnCount(wide() ? 3 : 2);
         Object[][] acts = hasLauncher ? new Object[][]{
@@ -941,6 +955,197 @@ public class MainActivity extends Activity implements AtvClient.Listener {
                 ui.postDelayed(mirrorLoop, r != null ? 300 : 3000);
             });
         }).start();
+    }
+
+    // ------------------------------------------------------------ "Enviar para a TV"
+
+    private static final int PICK = 41;
+    /** Something shared from another app while the TV was still connecting. */
+    private List<Uri> pendingUris;
+    private String pendingLink;
+
+    private boolean tvReady() { return client != null && client.connected(); }
+
+    private void sendMenu() {
+        if (!tvReady()) { toast("A TV não está ligada"); return; }
+        String[] opts = {"Fotos e vídeos", "Música", "Outros ficheiros", "Um link (YouTube, site…)"};
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Enviar para a TV")
+                .setItems(opts, (d, w) -> {
+                    if (w == 3) { askLink(); return; }
+                    Intent i;
+                    if (w == 0 && android.os.Build.VERSION.SDK_INT >= 33) {
+                        i = new Intent("android.provider.action.PICK_IMAGES").putExtra("android.provider.extra.PICK_IMAGES_MAX", 50);
+                    } else {
+                        i = new Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE);
+                        i.setType(w == 1 ? "audio/*" : "*/*");
+                        if (w == 0) i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+                        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                    }
+                    try { startActivityForResult(i, PICK); }
+                    catch (Exception e) { toast("Não há onde escolher ficheiros neste telemóvel"); }
+                })
+                .show();
+    }
+
+    private void askLink() {
+        EditText t = new EditText(this);
+        t.setSingleLine(true);
+        t.setHint("https://…");
+        t.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Abrir um link na TV")
+                .setMessage("Os links do YouTube abrem na app do YouTube da TV.")
+                .setView(t)
+                .setPositiveButton("Abrir", (d, w) -> openLink(t.getText().toString()))
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private void openLink(String text) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("https?://\\S+").matcher(text == null ? "" : text);
+        if (!m.find()) { toast("Isto não tem um link"); return; }
+        client.open(m.group());
+        toast("A abrir na TV…");
+    }
+
+    @Override
+    protected void onActivityResult(int req, int code, Intent data) {
+        super.onActivityResult(req, code, data);
+        if (req != PICK || code != RESULT_OK || data == null) return;
+        List<Uri> l = new ArrayList<>();
+        if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++) l.add(data.getClipData().getItemAt(i).getUri());
+        else if (data.getData() != null) l.add(data.getData());
+        if (!l.isEmpty()) chooseHow(l);
+    }
+
+    /** From "Partilhar" in the gallery, the files app or YouTube. */
+    @SuppressWarnings("deprecation")
+    private void takeShare(Intent i) {
+        if (i == null) return;
+        String a = i.getAction();
+        List<Uri> l = new ArrayList<>();
+        if (Intent.ACTION_SEND.equals(a)) {
+            Uri u = i.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (u != null) l.add(u);
+            else { pendingLink = i.getStringExtra(Intent.EXTRA_TEXT); }
+        } else if (Intent.ACTION_SEND_MULTIPLE.equals(a)) {
+            ArrayList<Uri> us = i.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (us != null) l.addAll(us);
+        } else return;
+        i.setAction(Intent.ACTION_MAIN); // do not send it again when the screen turns
+        if (!l.isEmpty()) pendingUris = l;
+        ui.removeCallbacks(sharePending);
+        shareTries = 0;
+        ui.postDelayed(sharePending, 400);
+    }
+
+    private int shareTries;
+    private final Runnable sharePending = new Runnable() {
+        @Override public void run() {
+            if (pendingUris == null && pendingLink == null) return;
+            if (!tvReady()) {
+                if (++shareTries == 1) toast("A ligar à TV para enviar…");
+                if (shareTries < 40) ui.postDelayed(this, 500);
+                else { toast("A TV não está ligada"); pendingUris = null; pendingLink = null; }
+                return;
+            }
+            if (pendingLink != null) { String t = pendingLink; pendingLink = null; openLink(t); }
+            if (pendingUris != null) { List<Uri> l = pendingUris; pendingUris = null; chooseHow(l); }
+        }
+    };
+
+    /** Photos, videos and music can be shown right away; any other file is kept on the TV. */
+    private void chooseHow(List<Uri> uris) {
+        if (!Sender.share(uris)) { toast("Não deu para ler o que escolheste"); return; }
+        boolean media = true;
+        for (Sender.Item it : Sender.items()) media &= it.media();
+        if (!media) { cast(true); return; }
+        int n = uris.size();
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(n == 1 ? Sender.items().get(0).name : n + " ficheiros")
+                .setItems(new String[]{"Ver na TV agora", "Guardar na TV"}, (d, w) -> cast(w == 1))
+                .show();
+    }
+
+    private void cast(boolean save) {
+        if (!tvReady()) { toast("A TV não está ligada"); return; }
+        String link;
+        try { link = "comandotv://" + (save ? "save" : "play") + "?s=" + URLEncoder.encode(Sender.base(host()), "UTF-8"); }
+        catch (Exception e) { return; }
+        AdbClient a = adb;
+        AlertDialog dlg = progressDialog(save);
+        if (a != null && a.connected()) {
+            new Thread(() -> {
+                int vc = 0;
+                try { vc = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode; } catch (Exception ignored) { }
+                ui.post(() -> setProgressText(dlg, "A preparar a TV…"));
+                boolean ok = a.ensureViewer(getApplicationInfo().sourceDir, vc);
+                ui.post(() -> {
+                    if (!ok) { dlg.dismiss(); installHelp(); return; }
+                    a.open(link);
+                });
+            }).start();
+        } else {
+            client.open(link);
+        }
+        // if the TV never asks for the list, it does not have Comando TV yet
+        ui.postDelayed(() -> { if (Sender.helloAt == 0 && dlg.isShowing()) { dlg.dismiss(); installHelp(); } }, a != null ? 45_000 : 8_000);
+    }
+
+    private TextView progText;
+    private ProgressBar progBar;
+
+    private AlertDialog progressDialog(boolean save) {
+        LinearLayout col = vlay();
+        col.setPadding(dp(24), dp(8), dp(24), dp(4));
+        progBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progBar.setMax(1000);
+        progBar.setIndeterminate(true);
+        progText = text(13, MUT, null);
+        progText.setText("A abrir na TV…");
+        progText.setPadding(0, dp(10), 0, 0);
+        col.addView(progBar, new LinearLayout.LayoutParams(-1, -2));
+        col.addView(progText);
+        int n = Sender.items().size();
+        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle((save ? "A guardar na TV · " : "A mostrar na TV · ") + (n == 1 ? Sender.items().get(0).name : n + " ficheiros"))
+                .setView(col)
+                .setPositiveButton(save ? "Esconder" : "OK", null)
+                .create();
+        d.show();
+        Runnable loop = new Runnable() {
+            @Override public void run() {
+                if (!d.isShowing()) return;
+                long[] p = Sender.progress();
+                if (Sender.helloAt != 0) {
+                    if (!save) { progBar.setIndeterminate(false); progBar.setProgress(1000); progText.setText("Já está na TV. Usa o comando: OK pausa, ◀ ▶ muda."); return; }
+                    if (p[1] > 0) {
+                        progBar.setIndeterminate(false);
+                        progBar.setProgress((int) (p[0] * 1000 / p[1]));
+                        progText.setText(p[0] >= p[1] ? "Guardado na TV em Transferências › ComandoTV" : TvViewer.mb(p[0]) + " de " + TvViewer.mb(p[1]));
+                        if (p[0] >= p[1]) return;
+                    }
+                }
+                ui.postDelayed(this, 300);
+            }
+        };
+        ui.post(loop);
+        return d;
+    }
+
+    private void setProgressText(AlertDialog d, String s) { if (d.isShowing() && progText != null) progText.setText(s); }
+
+    /** First time on TVs without network ADB: the TV needs Comando TV too. */
+    private void installHelp() {
+        String url = Sender.apkUrl(host());
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Falta o Comando TV na TV")
+                .setMessage("Para ver e guardar ficheiros, a TV também precisa do Comando TV (só uma vez).\n\n"
+                        + "Na TV, abre a app Downloader e escreve:\n" + url
+                        + "\n\nou descarrega-o em awdigital.pt/tv-remote. Depois volta a enviar.")
+                .setPositiveButton("OK", null)
+                .show();
     }
 
     // ------------------------------------------------------------ connection

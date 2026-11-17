@@ -10,4 +10,6 @@ public class App extends Application {
     @Override public void onCreate() { super.onCreate(); self = this; }
 
     static File files() { return self.getFilesDir(); }
+
+    static android.content.Context ctx() { return self; }
 }

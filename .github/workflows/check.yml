@@ -1,0 +1,17 @@
+name: Check build (branches)
+on:
+  push:
+    branches-ignore: [main]
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;36.0.0'
+      - run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: ComandoTV-apk-test, path: build/ComandoTV.apk }

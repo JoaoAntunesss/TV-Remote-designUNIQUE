@@ -342,6 +342,64 @@ final class AdbClient implements Remote {
         return out;
     }
 
+    /** Copies a file to the box (ADB "sync" service: SEND, DATA chunks, DONE). */
+    void push(File f, String remotePath) throws Exception {
+        if (!ready) throw new IOException("not connected");
+        Stream s = open("sync:", 5000);
+        try {
+            byte[] path = (remotePath + ",33188").getBytes(StandardCharsets.UTF_8); // 0100644
+            s.send(syncHeader("SEND", path.length, path));
+            try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) s.send(syncHeader("DATA", n, java.util.Arrays.copyOf(buf, n)));
+            }
+            s.send(syncHeader("DONE", (int) (System.currentTimeMillis() / 1000), new byte[0]));
+            ByteArrayOutputStream got = new ByteArrayOutputStream();
+            long end = System.currentTimeMillis() + 20_000;
+            while (got.size() < 8 && System.currentTimeMillis() < end) {
+                byte[] b = s.in.poll(200, TimeUnit.MILLISECONDS);
+                if (b != null) got.write(b);
+                else if (s.closed) break;
+            }
+            byte[] r = got.toByteArray();
+            if (r.length < 4 || r[0] != 'O' || r[1] != 'K') throw new IOException("the box did not accept the file");
+            s.send(syncHeader("QUIT", 0, new byte[0]));
+        } finally {
+            try { if (!s.closed) write(CLSE, s.local, s.remote, null); } catch (IOException ignored) { }
+            streams.remove(s.local);
+        }
+    }
+
+    private static byte[] syncHeader(String id, int arg, byte[] data) {
+        ByteBuffer b = ByteBuffer.allocate(8 + data.length).order(ByteOrder.LITTLE_ENDIAN);
+        b.put(id.getBytes(StandardCharsets.US_ASCII)).putInt(arg).put(data);
+        return b.array();
+    }
+
+    /**
+     * Makes sure the box has this same app, new enough to show what the phone sends (TvViewer).
+     * If not, copies the phone's own APK there and installs it. Returns false if that failed.
+     */
+    boolean ensureViewer(String apkPath, int versionCode) {
+        try {
+            String d = sh("dumpsys package com.antunes.remote | grep -m1 versionCode=");
+            int have = -1;
+            int at = d.indexOf("versionCode=");
+            if (at >= 0) {
+                String v = d.substring(at + 12).split("\\s")[0].trim();
+                try { have = Integer.parseInt(v); } catch (NumberFormatException ignored) { }
+            }
+            if (have >= versionCode) return true;
+            String tmp = "/data/local/tmp/comandotv.apk";
+            push(new File(apkPath), tmp);
+            String r = new String(exec("pm install -r " + tmp + " 2>&1; rm -f " + tmp, 120_000), StandardCharsets.UTF_8);
+            return r.contains("Success");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /** PNG of the TV screen. */
     byte[] screenshot() throws Exception { return exec("screencap -p", 8000); }
 

@@ -13,7 +13,7 @@ import android.graphics.drawable.Drawable;
 final class Icon extends Drawable {
     static final int BACK = 0, HOME = 1, PLAY_PAUSE = 2, MENU = 3, VOL_DOWN = 4, VOL_UP = 5, MUTE = 6, POWER = 7,
             GEAR = 8, SCREEN = 9, UP = 10, DOWN = 11, LEFT = 12, RIGHT = 13, SEARCH = 14, FIRE = 15, INPUT = 16,
-            IMAGE = 17, CLOCK = 18, KEYBOARD = 19, REW = 20, FWD = 21, SPLIT = 22, APPS = 23;
+            IMAGE = 17, CLOCK = 18, KEYBOARD = 19, REW = 20, FWD = 21, SPLIT = 22, APPS = 23, CAST = 24;
     private final int type;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -108,6 +108,10 @@ final class Icon extends Drawable {
             case REW: fill(); poly(12, 6, 3, 12, 12, 18); path.close(); c.drawPath(path, p); poly(21, 6, 12, 12, 21, 18); path.close(); c.drawPath(path, p); break;
             case FWD: fill(); poly(12, 6, 21, 12, 12, 18); path.close(); c.drawPath(path, p); poly(3, 6, 12, 12, 3, 18); path.close(); c.drawPath(path, p); break;
             case SPLIT: stroke(2f); rr(c, 2.5f, 5, 21.5f, 19, 2.5f); c.drawLine(12, 5, 12, 19, p); break;
+            case CAST:
+                stroke(2f); poly(3, 9, 3, 6.5f, 4.5f, 5, 19.5f, 5, 21, 6.5f, 21, 17.5f, 19.5f, 19, 14, 19); c.drawPath(path, p);
+                arc(c, 3, 19, 5, -90, 90); arc(c, 3, 19, 9, -90, 90);
+                fill(); c.drawCircle(4, 18, 1.6f, p); break;
             case APPS:
                 fill();
                 for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) rr(c, 4 + i * 6, 4 + j * 6, 8 + i * 6, 8 + j * 6, 1.2f);
